@@ -116,6 +116,23 @@ def _effort_label(score) -> str:
     return "effort élevé"
 
 
+_RISK_LEVEL_FR = {"LOW": "faible", "MEDIUM": "moyen", "HIGH": "élevé"}
+_TREND_FR = {
+    "accelerating": "en accélération",
+    "steady": "stable",
+    "saturating": "en train de saturer",
+    "insufficient_data": "pas assez de recul",
+}
+
+
+def _risk_label(score) -> str:
+    return _RISK_LEVEL_FR.get(score.risk_level, score.risk_level.lower())
+
+
+def _trend_label(score) -> str:
+    return _TREND_FR.get(score.trend, score.trend)
+
+
 def _meta_line(score) -> str:
     bits = []
     if score.money_mention:
@@ -180,10 +197,10 @@ def format_detail(
         f"Score global : {score.opportunity_score:.2f}  ·  valeur estimée : {decision.value_score:.2f}",
         f"Récompense mentionnée : {score.money_mention or 'non précisée dans le texte'}",
         f"Effort estimé : {_effort_label(score)}",
-        f"Risque : {score.risk_level.lower()}",
+        f"Risque : {_risk_label(score)}",
         f"Pertinence : {score.relevance_score:.0%}",
         f"Sources : {score.signal_count} signal(aux) · {'/'.join(sorted(score.platforms))}",
-        f"Tendance : {score.trend}",
+        f"Tendance : {_trend_label(score)}",
     ]
     if first_seen:
         lines.append(f"Détecté depuis : {first_seen[:10]}")
@@ -471,10 +488,23 @@ def handle_callback(state: ListenerState, token: str, chat_id: str, callback_que
         )
     elif action in ("ignore", "done"):
         state.store.record_decision(opp_id, action, score.opportunity_score)
-        label = "Ignorée" if action == "ignore" else "Prise en charge"
-        answer_callback(token, cq_id, label)
+        if action == "ignore":
+            answer_callback(token, cq_id, "Ignorée")
+            text = f"🚫 Ignorée ✅\n\"{_snippet(score, 90)}\""
+        else:
+            # Deliberately not "Prise en charge" — that read as if RADAR had
+            # done something. It hasn't: no automation exists here by
+            # design, this is a bookmark, not a status. Say that plainly.
+            answer_callback(token, cq_id, "Noté")
+            text = (
+                f"📌 Noté — tu t'en occupes\n\"{_snippet(score, 90)}\"\n\n"
+                f"RADAR n'a rien fait d'automatique, c'est juste un marque-page : "
+                f"plus de notification pour celle-ci sauf changement important."
+            )
+            if score.representative_url:
+                text += f"\n{score.representative_url}"
         if message_id:
-            edit_message(token, chat_id, message_id, f"{label} ✅\n\"{_snippet(score, 90)}\"")
+            edit_message(token, chat_id, message_id, text)
 
 
 HELP_TEXT = (
@@ -486,8 +516,9 @@ HELP_TEXT = (
     "/status — en cours ? auto actif ? prochain scan ?\n"
     "/help — cette liste\n\n"
     "Chaque opportunité a 3 boutons : Approfondir (détail complet), "
-    "Faire maintenant, Ignorer — les deux derniers sont mémorisés, "
-    "RADAR ne re-notifie pas dessus sans changement significatif."
+    "Faire maintenant (marque-page — RADAR ne fait rien pour toi), "
+    "Ignorer — les deux derniers sont mémorisés, RADAR ne re-notifie pas "
+    "dessus sans changement significatif."
 )
 
 

@@ -30,6 +30,18 @@ def test_political_content_scores_low_not_high():
     assert any(r.startswith("OFF-TOPIC:") for r in reasons)
 
 
+def test_us_macro_politics_with_big_dollar_figure_scores_low_not_high():
+    """Real false positive found live: a viral US-politics tweet with a
+    huge dollar figure and an accidental keyword match ("bonus") reached
+    do_now purely off engagement + that one accidental hit. The content
+    itself has to be flagged as noise regardless of what numbers are in it."""
+    score, reasons = compute_relevance(
+        "BREAKING: Congress passes $95 billion stimulus package, includes a one-time bonus for federal workers"
+    )
+    assert score < 0.3
+    assert any(r.startswith("OFF-TOPIC:") for r in reasons)
+
+
 def test_generic_short_comment_scores_low():
     score, reasons = compute_relevance("Good point.")
     assert score < 0.2

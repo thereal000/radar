@@ -39,6 +39,17 @@ _POSITIVE_CONCEPTS: dict[str, re.Pattern] = {
 _NEGATIVE_CONCEPTS: dict[str, re.Pattern] = {
     "conspiracy_or_politics": re.compile(r"\b(conspiracy|senate race|election|parliament|president|congress(?:man|woman)?|prime minister)\b", re.I),
     "generic_news": re.compile(r"\b(breaking news|poll shows|according to (police|officials))\b", re.I),
+    # Real false positive found live: a viral US-politics/macro-economics
+    # tweet with a huge dollar figure ("$95 billion aid package") scored a
+    # high opportunity_score purely off engagement + an accidental
+    # relevance-keyword hit (e.g. "bonus") — nothing flagged it as noise
+    # even though it plainly isn't an opportunity for the user.
+    "us_politics_or_macro_news": re.compile(
+        r"\b(white house|capitol hill|congress(?:ional)?|the senate|supreme court|federal reserve|"
+        r"the fed|national debt|gdp growth|inflation rate|interest rate hike|government shutdown|"
+        r"stimulus (?:package|bill)|state of the union|presidential election|midterms?)\b",
+        re.I,
+    ),
 }
 
 

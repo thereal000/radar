@@ -10,6 +10,7 @@ should be revisited once more real cycles accumulate.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 
 from .scoring import OpportunityScore
@@ -45,10 +46,22 @@ _RISK_LABELS = {
     "compounding:low_source_independence": "peu de sources indépendantes",
 }
 
+# Real, "not actually a giveaway" language: entering a raffle/sweepstakes
+# isn't claiming a reward, it's buying a lottery ticket — cool find, but not
+# the guaranteed-if-you-do-X opportunity the do_now tier promises. Found
+# live: a giveaway that was legitimate but effectively unwinnable (one
+# winner picked from a huge pool) was surfacing as do_now.
+_SELECTIVE_RE = re.compile(
+    r"\b(chance to win|sweepstakes|raffle|lucky winner|winners? will be (?:selected|chosen|announced|picked)|"
+    r"one (?:lucky )?winner|enter to win|drawing will be held|randomly selected)\b",
+    re.I,
+)
+
 # Thresholds on value_score (see _value_score) for each tier.
 _DO_NOW_MIN_VALUE = 0.10
 _WATCH_MIN_VALUE = 0.04
 _MIN_RELEVANCE_FOR_DO_NOW = 0.5
+_MIN_POSITIVE_CONCEPTS_FOR_DO_NOW = 2  # one accidental keyword match must never be enough on its own
 
 
 @dataclass
@@ -72,13 +85,35 @@ def _value_score(score: OpportunityScore) -> float:
 
 
 def decide(score: OpportunityScore) -> Decision:
-    why = [_RELEVANCE_LABELS.get(r, r) for r in score.relevance_reasons if not r.startswith("OFF-TOPIC")]
+    positive_reasons = [r for r in score.relevance_reasons if not r.startswith("OFF-TOPIC")]
+    off_topic_hits = [r for r in score.relevance_reasons if r.startswith("OFF-TOPIC:")]
+    why = [_RELEVANCE_LABELS.get(r, r) for r in positive_reasons]
     concerns = [_RISK_LABELS.get(r, r) for r in score.risk_reasons]
     value = _value_score(score)
 
-    if score.risk_level == "HIGH" or score.relevance_score < 0.4:
+    selective = bool(_SELECTIVE_RE.search(score.representative_text or ""))
+    if selective:
+        concerns.append("tirage au sort / sélection — pas garanti même en participant")
+        value = round(value * 0.4, 4)
+
+    if off_topic_hits:
+        # relevance.py already flagged this as noise (politics/news/etc.) —
+        # a coincidental keyword match or a big number in the text must
+        # never override that. This signal was being computed and silently
+        # thrown away before; a viral US-politics tweet with a huge dollar
+        # figure was reaching do_now purely off engagement + one accidental
+        # keyword hit.
+        concerns.append("probablement hors-sujet (actualité/politique) malgré des mots-clés qui matchent")
         tier = IGNORE
-    elif score.risk_level == "LOW" and value >= _DO_NOW_MIN_VALUE and score.relevance_score >= _MIN_RELEVANCE_FOR_DO_NOW:
+    elif score.risk_level == "HIGH" or score.relevance_score < 0.4:
+        tier = IGNORE
+    elif (
+        score.risk_level == "LOW"
+        and value >= _DO_NOW_MIN_VALUE
+        and score.relevance_score >= _MIN_RELEVANCE_FOR_DO_NOW
+        and len(positive_reasons) >= _MIN_POSITIVE_CONCEPTS_FOR_DO_NOW
+        and not selective
+    ):
         tier = DO_NOW
     elif value >= _WATCH_MIN_VALUE:
         tier = WATCH
