@@ -63,6 +63,33 @@ def _snippet(s, width: int = 90) -> str:
     return text
 
 
+def _new_scores(result):
+    return sorted((s for s in result.scores if s.is_new), key=lambda s: s.opportunity_score, reverse=True)
+
+
+def format_summary(result, elapsed: float, mode: str = "manuel") -> str:
+    """Short push: title + the essential, nothing else. Full breakdown lives
+    behind /top — this is the "headline", /top is "approfondir"."""
+    icon = "🛰️" if mode == "auto" else "🔎"
+    label = "scan auto" if mode == "auto" else "scan manuel"
+    new_ones = _new_scores(result)
+
+    if not new_ones:
+        return f"{icon} {label} terminé ({elapsed:.0f}s) — rien de nouveau. /top pour le classement actuel."
+
+    validated_new = [s for s in new_ones if _is_validated(s)]
+    best = new_ones[0]
+    mark = "✅" if _is_validated(best) else "❔"
+    lines = [
+        f"{icon} {len(new_ones)} 🆕 nouvelle(s) ({len(validated_new)} validée(s))",
+        f"{mark} {best.opportunity_score:.2f} · {'/'.join(sorted(best.platforms))} · \"{_snippet(best, 70)}\"",
+    ]
+    if len(new_ones) > 1:
+        lines.append(f"+ {len(new_ones) - 1} autre(s) nouvelle(s)")
+    lines.append("/top pour le détail complet")
+    return "\n".join(lines)
+
+
 def format_result(result, elapsed: float, mode: str = "manuel", top_n: int = 5) -> str:
     header_icon = "🛰️" if mode == "auto" else "🔎"
     mode_label = "scan auto" if mode == "auto" else "scan manuel"
@@ -132,7 +159,7 @@ def run_and_report(state: ListenerState, dispatcher, token: str, chat_id: str) -
     try:
         result, elapsed = run_once(dispatcher=dispatcher)
         state.last_result, state.last_elapsed, state.last_mode = result, elapsed, "manuel"
-        send_message(token, chat_id, format_result(result, elapsed, mode="manuel"))
+        send_message(token, chat_id, format_summary(result, elapsed, mode="manuel"))
     except Exception:
         send_message(token, chat_id, f"⚠️ Erreur pendant le scan manuel:\n{traceback.format_exc()[-1500:]}")
     finally:
@@ -157,22 +184,24 @@ def start_auto(state: ListenerState, dispatcher, token: str, chat_id: str) -> No
 
     def job():
         # Same lock as /run — both touch the same SQLite file, never let them overlap.
+        # Auto-scan stays silent by design: no start announcement, and no end
+        # message unless it actually found something new — a scan that finds
+        # nothing new is not worth a notification.
         if not state.lock.acquire(blocking=False):
-            send_message(
-                token, chat_id,
-                f"🛰️ Scan auto sauté ce tour-ci : {_busy_message(state)[2:]}",
-            )
+            print("[telegram] auto-scan skipped this round: a scan is already running")
             return
         state.running = True
         state.running_mode = "auto"
         state.running_since = time.time()
-        send_message(token, chat_id, "🛰️ Scan auto lancé — ça prend généralement 4 à 7 minutes...")
         try:
             t0 = time.perf_counter()
             result = run_cycle(DEFAULT_QUERIES, store, dispatcher, alert_threshold=ALERT_THRESHOLD)
             elapsed = time.perf_counter() - t0
             state.last_result, state.last_elapsed, state.last_mode = result, elapsed, "auto"
-            send_message(token, chat_id, format_result(result, elapsed, mode="auto"))
+            if _new_scores(result):
+                send_message(token, chat_id, format_summary(result, elapsed, mode="auto"))
+            else:
+                print(f"[telegram] auto-scan done, nothing new ({elapsed:.0f}s) — staying quiet")
         except Exception:
             send_message(token, chat_id, f"⚠️ Erreur pendant le scan auto:\n{traceback.format_exc()[-1500:]}")
         finally:
@@ -190,7 +219,7 @@ def start_auto(state: ListenerState, dispatcher, token: str, chat_id: str) -> No
         token, chat_id,
         f"🛰️ Scan auto activé — un cycle toutes les {AUTO_INTERVAL_MINUTES} min "
         f"(prochain vers {(_dt.datetime.now() + _dt.timedelta(minutes=AUTO_INTERVAL_MINUTES)).strftime('%H:%M')}). "
-        f"Tu reçois un message à chaque démarrage ET à chaque fin de scan. /stop pour couper.",
+        f"Silencieux si rien de nouveau — tu ne reçois un message que quand un scan trouve du neuf. /status pour vérifier que ça tourne, /stop pour couper.",
     )
 
 
@@ -206,11 +235,11 @@ def stop_auto(state: ListenerState, token: str, chat_id: str) -> None:
 
 HELP_TEXT = (
     "🛰️ cry4scan — commandes\n\n"
-    "/run — lance un cycle maintenant\n"
-    "/auto — active le scan automatique (toutes les 30 min)\n"
+    "/run — lance un cycle maintenant (résumé court à la fin)\n"
+    "/auto — active le scan automatique (toutes les 30 min, silencieux si rien de nouveau)\n"
     "/stop — coupe le scan automatique\n"
-    "/top — renvoie le dernier résultat (instantané)\n"
-    "/status — en cours ? auto actif ?\n"
+    "/top — le détail complet du dernier résultat (le \"approfondir\")\n"
+    "/status — en cours ? auto actif ? prochain scan quand ?\n"
     "/help — cette liste"
 )
 
