@@ -1,0 +1,13 @@
+courlan==1.4.0
+datasketch==2.0.0
+rapidfuzz==3.14.6
+pyyaml==6.0.3
+pytest==8.*
+ruptures==1.1.10
+apprise==1.13.1
+apscheduler<4
+win10toast-persist
+psutil==7.2.2
+feedparser==6.0.14
+yt-dlp==2026.8.19
+requests==2.34.2
