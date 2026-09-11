@@ -119,6 +119,12 @@ class OpportunityScore:
     confidence_score: float = 0.0
     opportunity_score: float = 0.0
 
+    # display-only, not used in any scoring math — lets callers (e.g. the
+    # Telegram bot) show what the opportunity actually is without a second
+    # DB lookup
+    representative_text: str = ""
+    representative_url: str = ""
+
 
 def score_opportunity(cluster: Cluster, opportunity_id: str, snapshots: list[dict]) -> OpportunityScore:
     signal_count = len(cluster.signals)
@@ -198,4 +204,6 @@ def score_opportunity(cluster: Cluster, opportunity_id: str, snapshots: list[dic
         risk_reasons=risk.reasons,
         confidence_score=round(confidence_score, 3),
         opportunity_score=round(opportunity_score, 3),
+        representative_text=(cluster.representative.text or cluster.representative.title or "")[:300],
+        representative_url=cluster.representative.canonical_url or cluster.representative.url or "",
     )

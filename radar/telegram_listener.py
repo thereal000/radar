@@ -1,0 +1,252 @@
+"""cry4scan — Telegram remote control for RADAR.
+
+Run this once on your machine (it keeps running, polling Telegram):
+    python telegram_listener.py
+
+From Telegram:
+    /run     lance un cycle maintenant, répond avec les résultats
+    /auto    active le scan automatique (toutes les 30 min)
+    /stop    coupe le scan automatique
+    /top     renvoie le dernier résultat en cache (instantané, pas de nouveau scan)
+    /status  état actuel (en cours / auto actif ou non)
+    /help    liste des commandes
+
+Only replies to the chat_id in .env.local — anyone else messaging the bot
+is ignored, so a stranger who finds the bot username can't trigger runs on
+your machine. Uses plain long-polling on Telegram's getUpdates via
+`requests` (already a project dependency) — no new library needed.
+"""
+from __future__ import annotations
+
+import sys
+import threading
+import time
+import traceback
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import requests
+
+from run import ALERT_THRESHOLD, DEFAULT_QUERIES, build_dispatcher, load_env_local, run_once
+
+POLL_TIMEOUT = 30  # seconds, Telegram long-poll
+AUTO_INTERVAL_MINUTES = 30
+
+# Opportunities at/above this bar (LOW risk, decent relevance) are shown as
+# "validated" — worth a look now. Everything else is shown as "à vérifier"
+# so the two aren't visually confused in a wall of scores.
+VALIDATED_RISK_LEVELS = {"LOW"}
+VALIDATED_MIN_RELEVANCE = 0.5
+
+
+def send_message(token: str, chat_id: str, text: str) -> None:
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text[:4000], "disable_web_page_preview": True},
+            timeout=15,
+        )
+    except requests.RequestException as e:
+        print(f"[telegram] failed to send message: {e}")
+
+
+def _is_validated(s) -> bool:
+    return s.risk_level in VALIDATED_RISK_LEVELS and s.relevance_score >= VALIDATED_MIN_RELEVANCE
+
+
+def _snippet(s, width: int = 90) -> str:
+    text = (s.representative_text or "").strip().replace("\n", " ")
+    if len(text) > width:
+        text = text[: width - 1].rstrip() + "…"
+    return text
+
+
+def format_result(result, elapsed: float, top_n: int = 5) -> str:
+    top = sorted(result.scores, key=lambda s: s.opportunity_score, reverse=True)[:top_n]
+    validated = [s for s in top if _is_validated(s)]
+
+    lines = [
+        f"🛰️ cry4scan — cycle terminé ({elapsed:.0f}s)",
+        f"{result.raw_count} bruts → {result.signal_count} signaux → {result.cluster_count} clusters · {len(validated)}/{len(top)} validés",
+        "",
+    ]
+
+    if not top:
+        lines.append("Rien de significatif ce cycle-ci.")
+        return "\n".join(lines)
+
+    for i, s in enumerate(top, 1):
+        mark = "✅" if _is_validated(s) else "❔"
+        platforms = "/".join(sorted(s.platforms))
+        snippet = _snippet(s)
+        line = f"{mark} {i}. {s.opportunity_score:.2f} · {platforms} · {s.signal_count} sig · risque {s.risk_level}"
+        lines.append(line)
+        if snippet:
+            lines.append(f"    “{snippet}”")
+        if s.representative_url:
+            lines.append(f"    {s.representative_url}")
+
+    lines.append("")
+    lines.append("✅ validé  ❔ à vérifier")
+    return "\n".join(lines)
+
+
+class ListenerState:
+    def __init__(self):
+        self.running = False
+        self.auto_on = False
+        self.last_result = None
+        self.last_elapsed = None
+        self.scheduler = None
+        self.lock = threading.Lock()  # serializes /run against the auto-scan job — both hit the same SQLite file
+
+
+def run_and_report(state: ListenerState, dispatcher, token: str, chat_id: str, announce_start: bool) -> None:
+    if state.running:
+        send_message(token, chat_id, "⏳ Un cycle est déjà en cours, patiente.")
+        return
+    if not state.lock.acquire(blocking=False):
+        send_message(token, chat_id, "⏳ Le scan auto tourne en ce moment, réessaie dans un instant.")
+        return
+    state.running = True
+    if announce_start:
+        send_message(token, chat_id, "🔎 Cycle lancé, ça prend quelques minutes...")
+    try:
+        result, elapsed = run_once(dispatcher=dispatcher)
+        state.last_result, state.last_elapsed = result, elapsed
+        send_message(token, chat_id, format_result(result, elapsed))
+    except Exception:
+        send_message(token, chat_id, f"⚠️ Erreur pendant le cycle:\n{traceback.format_exc()[-1500:]}")
+    finally:
+        state.running = False
+        state.lock.release()
+
+
+def start_auto(state: ListenerState, dispatcher, token: str, chat_id: str) -> None:
+    if state.auto_on:
+        send_message(token, chat_id, f"🛰️ Scan auto déjà actif (toutes les {AUTO_INTERVAL_MINUTES} min).")
+        return
+
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from apscheduler.triggers.interval import IntervalTrigger
+
+    from radar.signals.orchestrator import run_cycle
+    from radar.signals.store import RadarStore
+
+    store = RadarStore()
+
+    def job():
+        # Same lock as /run — both touch the same SQLite file, never let them overlap.
+        if not state.lock.acquire(blocking=False):
+            print("[telegram] auto-scan skipped: a manual /run is in progress")
+            return
+        state.running = True
+        try:
+            t0 = time.perf_counter()
+            result = run_cycle(DEFAULT_QUERIES, store, dispatcher, alert_threshold=ALERT_THRESHOLD)
+            elapsed = time.perf_counter() - t0
+            state.last_result, state.last_elapsed = result, elapsed
+            send_message(token, chat_id, format_result(result, elapsed))
+        except Exception:
+            send_message(token, chat_id, f"⚠️ Erreur pendant le scan auto:\n{traceback.format_exc()[-1500:]}")
+        finally:
+            state.running = False
+            state.lock.release()
+
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(job, trigger=IntervalTrigger(minutes=AUTO_INTERVAL_MINUTES))
+    scheduler.start()
+    state.scheduler = scheduler
+    state.auto_on = True
+    send_message(token, chat_id, f"🛰️ Scan auto activé — un cycle toutes les {AUTO_INTERVAL_MINUTES} min. /stop pour couper.")
+
+
+def stop_auto(state: ListenerState, token: str, chat_id: str) -> None:
+    if not state.auto_on or not state.scheduler:
+        send_message(token, chat_id, "Le scan auto n'est pas actif.")
+        return
+    state.scheduler.shutdown(wait=False)
+    state.scheduler = None
+    state.auto_on = False
+    send_message(token, chat_id, "🛑 Scan auto coupé.")
+
+
+HELP_TEXT = (
+    "🛰️ cry4scan — commandes\n\n"
+    "/run — lance un cycle maintenant\n"
+    "/auto — active le scan automatique (toutes les 30 min)\n"
+    "/stop — coupe le scan automatique\n"
+    "/top — renvoie le dernier résultat (instantané)\n"
+    "/status — en cours ? auto actif ?\n"
+    "/help — cette liste"
+)
+
+
+def main() -> None:
+    env = load_env_local()
+    token = env.get("TELEGRAM_BOT_TOKEN")
+    chat_id = env.get("TELEGRAM_CHAT_ID")
+    if not token or not chat_id:
+        print("[telegram] TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID missing from .env.local — nothing to do.")
+        return
+
+    dispatcher = build_dispatcher()
+    state = ListenerState()
+    print(f"[telegram] cry4scan listening from chat {chat_id}... (Ctrl+C to stop)")
+    send_message(token, chat_id, "🛰️ cry4scan en ligne. /help pour les commandes.")
+
+    offset = 0
+
+    try:
+        while True:
+            try:
+                resp = requests.get(
+                    f"https://api.telegram.org/bot{token}/getUpdates",
+                    params={"offset": offset, "timeout": POLL_TIMEOUT},
+                    timeout=POLL_TIMEOUT + 10,
+                )
+                resp.raise_for_status()
+                updates = resp.json().get("result", [])
+            except requests.RequestException as e:
+                print(f"[telegram] poll error: {e} — retrying in 5s")
+                time.sleep(5)
+                continue
+
+            for update in updates:
+                offset = update["update_id"] + 1
+                message = update.get("message") or {}
+                from_chat = str(message.get("chat", {}).get("id", ""))
+                text = (message.get("text") or "").strip()
+
+                if from_chat != str(chat_id):
+                    continue  # ignore anyone but the configured owner
+
+                if text == "/run":
+                    threading.Thread(
+                        target=run_and_report, args=(state, dispatcher, token, chat_id, True), daemon=True
+                    ).start()
+                elif text == "/auto":
+                    start_auto(state, dispatcher, token, chat_id)
+                elif text == "/stop":
+                    stop_auto(state, token, chat_id)
+                elif text == "/top":
+                    if state.last_result is None:
+                        send_message(token, chat_id, "Pas encore de résultat en cache. /run pour en lancer un.")
+                    else:
+                        send_message(token, chat_id, format_result(state.last_result, state.last_elapsed or 0.0))
+                elif text == "/status":
+                    bits = [
+                        "⏳ cycle en cours" if state.running else "💤 inactif",
+                        f"🛰️ auto {'ON' if state.auto_on else 'OFF'}",
+                    ]
+                    send_message(token, chat_id, " · ".join(bits))
+                elif text in ("/help", "/start"):
+                    send_message(token, chat_id, HELP_TEXT)
+    finally:
+        if state.scheduler:
+            state.scheduler.shutdown(wait=False)
+
+
+if __name__ == "__main__":
+    main()

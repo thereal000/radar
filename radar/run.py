@@ -25,7 +25,14 @@ DEFAULT_QUERIES = [
     "free credits", "creator rewards", "referral rewards", "testnet rewards",
     "beta rewards", "hackathon prize", "grant program", "token airdrop",
     "points campaign", "early access rewards", "NFT distribution", "limited giveaway",
+    "startup credits", "bug bounty",
 ]
+
+# Was 0.35 (orchestrator's default). Real usage showed the top score barely
+# ever clears 0.35 and barely moves cycle to cycle, so after the first
+# alert the cooldown silences everything — 1 alert across 5 real runs.
+# Lowered so genuinely good candidates below the old bar get through too.
+ALERT_THRESHOLD = 0.30
 
 
 def load_env_local() -> dict[str, str]:
@@ -54,13 +61,13 @@ def build_dispatcher() -> AlertDispatcher:
     return AlertDispatcher(enable_desktop_toast=True, extra_apprise_urls=extra_urls)
 
 
-def run_once() -> None:
+def run_once(dispatcher: AlertDispatcher | None = None):
     store = RadarStore()
-    dispatcher = build_dispatcher()
+    dispatcher = dispatcher or build_dispatcher()
 
     print(f"[run] starting cycle — {len(DEFAULT_QUERIES)} queries, 6 sources...")
     t0 = time.perf_counter()
-    result = run_cycle(DEFAULT_QUERIES, store, dispatcher)
+    result = run_cycle(DEFAULT_QUERIES, store, dispatcher, alert_threshold=ALERT_THRESHOLD)
     elapsed = time.perf_counter() - t0
 
     print(f"\n{'=' * 70}")
@@ -74,6 +81,8 @@ def run_once() -> None:
             f"  score={s.opportunity_score:.3f}  relevance={s.relevance_score:.2f}  risk={s.risk_level:6s}  "
             f"signals={s.signal_count:3d}  platforms={sorted(s.platforms)}  trend={s.trend}"
         )
+
+    return result, elapsed
 
 
 def run_loop(interval_minutes: float) -> None:
@@ -90,6 +99,7 @@ def run_loop(interval_minutes: float) -> None:
     scheduler = build_scheduler(
         DEFAULT_QUERIES, store, dispatcher,
         interval_minutes=interval_minutes,
+        alert_threshold=ALERT_THRESHOLD,
         on_cycle_done=on_done,
     )
     print(f"[run] scheduler started — one cycle every {interval_minutes} min. Ctrl+C to stop.")
