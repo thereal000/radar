@@ -29,10 +29,11 @@ def _tmp_store() -> RadarStore:
 def test_new_opportunity_gets_persisted_with_one_snapshot():
     store = _tmp_store()
     clusters = build_clusters([_tweet("a1", "ProjectX airdrop of $500 USDC is live now")])
-    mapping, run_id = store.persist_run(clusters)
+    mapping, run_id, new_ids = store.persist_run(clusters)
 
     assert len(mapping) == 1
     opp_id = next(iter(mapping.values()))
+    assert new_ids == {opp_id}
     snaps = store.get_snapshots(opp_id)
     assert len(snaps) == 1
     assert snaps[0]["signal_count"] == 1
@@ -45,14 +46,16 @@ def test_same_opportunity_across_two_runs_resolves_to_same_id():
     store = _tmp_store()
 
     run1 = build_clusters([_tweet("a1", "ProjectX airdrop of $500 USDC is live now, claim it")])
-    mapping1, _ = store.persist_run(run1)
+    mapping1, _, new_ids1 = store.persist_run(run1)
     opp_id_1 = next(iter(mapping1.values()))
+    assert new_ids1 == {opp_id_1}
 
     run2 = build_clusters([_tweet("a2", "ProjectX airdrop of $500 USDC is live, go claim it now")])
-    mapping2, _ = store.persist_run(run2)
+    mapping2, _, new_ids2 = store.persist_run(run2)
     opp_id_2 = next(iter(mapping2.values()))
 
     assert opp_id_1 == opp_id_2
+    assert new_ids2 == set()  # same opportunity resolved again, not a new find
     snaps = store.get_snapshots(opp_id_1)
     assert len(snaps) == 2
     assert snaps[-1]["signal_count"] == 2  # a1 + a2 both attributed to the same opportunity
@@ -61,12 +64,13 @@ def test_same_opportunity_across_two_runs_resolves_to_same_id():
 def test_unrelated_opportunity_gets_a_different_id():
     store = _tmp_store()
     run1 = build_clusters([_tweet("a1", "ProjectX airdrop of $500 USDC is live now")])
-    mapping1, _ = store.persist_run(run1)
+    mapping1, _, _ = store.persist_run(run1)
 
     run2 = build_clusters([_tweet("b1", "Best pizza dough recipe ever, 2 cups flour 1 tsp yeast")])
-    mapping2, _ = store.persist_run(run2)
+    mapping2, _, new_ids2 = store.persist_run(run2)
 
     assert set(mapping1.values()) != set(mapping2.values())
+    assert new_ids2 == set(mapping2.values())  # genuinely unrelated content, a new opportunity
 
 
 def test_should_alert_false_right_after_marking_with_unchanged_score():

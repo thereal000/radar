@@ -125,6 +125,12 @@ class OpportunityScore:
     representative_text: str = ""
     representative_url: str = ""
 
+    # set by the orchestrator after persist_run, since score_opportunity()
+    # itself has no notion of "new vs already stored" — lets callers tell a
+    # genuinely new find apart from the same still-live opportunity showing
+    # up again on a later cycle
+    is_new: bool = False
+
 
 def score_opportunity(cluster: Cluster, opportunity_id: str, snapshots: list[dict]) -> OpportunityScore:
     signal_count = len(cluster.signals)

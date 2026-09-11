@@ -160,11 +160,21 @@ class RadarStore:
                 return opp.opportunity_id
         return None
 
-    def persist_run(self, clusters: list[Cluster], run_id: str | None = None) -> tuple[dict[str, str], str]:
-        """Persists one pipeline run's clusters. Returns ({cluster_id: opportunity_id}, run_id)."""
+    def persist_run(
+        self, clusters: list[Cluster], run_id: str | None = None
+    ) -> tuple[dict[str, str], str, set[str]]:
+        """Persists one pipeline run's clusters. Returns ({cluster_id: opportunity_id}, run_id, new_opportunity_ids).
+
+        new_opportunity_ids is the set of opportunity_ids that did NOT exist
+        before this run — lets callers (e.g. the Telegram bot) tell a genuinely
+        new opportunity apart from one we've already reported on a previous
+        cycle, instead of the same still-live content looking like repeated
+        noise every 30 minutes.
+        """
         run_id = run_id or uuid.uuid4().hex[:12]
         now = _now_iso()
         cluster_to_opportunity: dict[str, str] = {}
+        new_opportunity_ids: set[str] = set()
 
         with closing(self._connect()) as conn:
             existing = self._existing_opportunities(conn)
@@ -174,6 +184,7 @@ class RadarStore:
                 is_new = opp_id is None
                 if is_new:
                     opp_id = uuid.uuid4().hex[:16]
+                    new_opportunity_ids.add(opp_id)
 
                 rep = cluster.representative
                 rep_entities = extract_entities(rep.text or rep.title or "")
@@ -230,7 +241,7 @@ class RadarStore:
 
             conn.commit()
 
-        return cluster_to_opportunity, run_id
+        return cluster_to_opportunity, run_id, new_opportunity_ids
 
     def get_snapshots(self, opportunity_id: str) -> list[dict]:
         with closing(self._connect()) as conn:

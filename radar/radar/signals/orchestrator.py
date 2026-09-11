@@ -27,7 +27,7 @@ def run_cycle(
 ) -> CycleResult:
     """One full COLLECT -> ... -> CLUSTER -> PERSIST -> SCORE -> ALERT cycle."""
     pipeline_result = run_pipeline(queries, per_query_limit=per_query_limit)
-    cluster_to_opportunity, run_id = store.persist_run(pipeline_result.clusters)
+    cluster_to_opportunity, run_id, new_opportunity_ids = store.persist_run(pipeline_result.clusters)
 
     scores: list[OpportunityScore] = []
     scored_for_alerts: list[tuple[OpportunityScore, str]] = []
@@ -35,6 +35,7 @@ def run_cycle(
         opp_id = cluster_to_opportunity[cluster.cluster_id]
         snapshots = store.get_snapshots(opp_id)
         score = score_opportunity(cluster, opp_id, snapshots)
+        score.is_new = opp_id in new_opportunity_ids
         scores.append(score)
         scored_for_alerts.append((score, cluster.representative.text or cluster.representative.title or ""))
 

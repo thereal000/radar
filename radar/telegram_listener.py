@@ -18,6 +18,7 @@ your machine. Uses plain long-polling on Telegram's getUpdates via
 """
 from __future__ import annotations
 
+import datetime as _dt
 import sys
 import threading
 import time
@@ -62,13 +63,18 @@ def _snippet(s, width: int = 90) -> str:
     return text
 
 
-def format_result(result, elapsed: float, top_n: int = 5) -> str:
+def format_result(result, elapsed: float, mode: str = "manuel", top_n: int = 5) -> str:
+    header_icon = "🛰️" if mode == "auto" else "🔎"
+    mode_label = "scan auto" if mode == "auto" else "scan manuel"
+
     top = sorted(result.scores, key=lambda s: s.opportunity_score, reverse=True)[:top_n]
     validated = [s for s in top if _is_validated(s)]
+    new_count = sum(1 for s in top if s.is_new)
 
     lines = [
-        f"🛰️ cry4scan — cycle terminé ({elapsed:.0f}s)",
-        f"{result.raw_count} bruts → {result.signal_count} signaux → {result.cluster_count} clusters · {len(validated)}/{len(top)} validés",
+        f"{header_icon} cry4scan — {mode_label} terminé ({elapsed:.0f}s)",
+        f"{result.raw_count} bruts → {result.signal_count} signaux → {result.cluster_count} clusters",
+        f"{new_count} 🆕 nouvelles · {len(top) - new_count} déjà connues · {len(validated)}/{len(top)} validées",
         "",
     ]
 
@@ -78,9 +84,10 @@ def format_result(result, elapsed: float, top_n: int = 5) -> str:
 
     for i, s in enumerate(top, 1):
         mark = "✅" if _is_validated(s) else "❔"
+        new_badge = " 🆕" if s.is_new else ""
         platforms = "/".join(sorted(s.platforms))
         snippet = _snippet(s)
-        line = f"{mark} {i}. {s.opportunity_score:.2f} · {platforms} · {s.signal_count} sig · risque {s.risk_level}"
+        line = f"{mark} {i}. {s.opportunity_score:.2f} · {platforms} · {s.signal_count} sig · risque {s.risk_level}{new_badge}"
         lines.append(line)
         if snippet:
             lines.append(f"    “{snippet}”")
@@ -88,38 +95,50 @@ def format_result(result, elapsed: float, top_n: int = 5) -> str:
             lines.append(f"    {s.representative_url}")
 
     lines.append("")
-    lines.append("✅ validé  ❔ à vérifier")
+    lines.append("✅ validé  ❔ à vérifier  🆕 jamais vu avant")
     return "\n".join(lines)
 
 
 class ListenerState:
     def __init__(self):
         self.running = False
+        self.running_mode = None  # "manuel" | "auto" — which kind of scan currently holds the lock
+        self.running_since = None  # datetime — for ETA context on "already running" messages
         self.auto_on = False
         self.last_result = None
         self.last_elapsed = None
+        self.last_mode = None
         self.scheduler = None
         self.lock = threading.Lock()  # serializes /run against the auto-scan job — both hit the same SQLite file
 
 
-def run_and_report(state: ListenerState, dispatcher, token: str, chat_id: str, announce_start: bool) -> None:
-    if state.running:
-        send_message(token, chat_id, "⏳ Un cycle est déjà en cours, patiente.")
-        return
+def _busy_message(state: ListenerState) -> str:
+    since = ""
+    if state.running_since:
+        elapsed_s = (time.time() - state.running_since)
+        since = f" (démarré il y a {elapsed_s:.0f}s)"
+    who = "Le scan automatique" if state.running_mode == "auto" else "Un scan manuel"
+    return f"⏳ {who} est en cours{since} — un seul scan à la fois pour ne pas surcharger la base. Réessaie dans quelques minutes."
+
+
+def run_and_report(state: ListenerState, dispatcher, token: str, chat_id: str) -> None:
     if not state.lock.acquire(blocking=False):
-        send_message(token, chat_id, "⏳ Le scan auto tourne en ce moment, réessaie dans un instant.")
+        send_message(token, chat_id, _busy_message(state))
         return
     state.running = True
-    if announce_start:
-        send_message(token, chat_id, "🔎 Cycle lancé, ça prend quelques minutes...")
+    state.running_mode = "manuel"
+    state.running_since = time.time()
+    send_message(token, chat_id, "🔎 Scan manuel lancé — ça prend généralement 4 à 7 minutes...")
     try:
         result, elapsed = run_once(dispatcher=dispatcher)
-        state.last_result, state.last_elapsed = result, elapsed
-        send_message(token, chat_id, format_result(result, elapsed))
+        state.last_result, state.last_elapsed, state.last_mode = result, elapsed, "manuel"
+        send_message(token, chat_id, format_result(result, elapsed, mode="manuel"))
     except Exception:
-        send_message(token, chat_id, f"⚠️ Erreur pendant le cycle:\n{traceback.format_exc()[-1500:]}")
+        send_message(token, chat_id, f"⚠️ Erreur pendant le scan manuel:\n{traceback.format_exc()[-1500:]}")
     finally:
         state.running = False
+        state.running_mode = None
+        state.running_since = None
         state.lock.release()
 
 
@@ -139,19 +158,27 @@ def start_auto(state: ListenerState, dispatcher, token: str, chat_id: str) -> No
     def job():
         # Same lock as /run — both touch the same SQLite file, never let them overlap.
         if not state.lock.acquire(blocking=False):
-            print("[telegram] auto-scan skipped: a manual /run is in progress")
+            send_message(
+                token, chat_id,
+                f"🛰️ Scan auto sauté ce tour-ci : {_busy_message(state)[2:]}",
+            )
             return
         state.running = True
+        state.running_mode = "auto"
+        state.running_since = time.time()
+        send_message(token, chat_id, "🛰️ Scan auto lancé — ça prend généralement 4 à 7 minutes...")
         try:
             t0 = time.perf_counter()
             result = run_cycle(DEFAULT_QUERIES, store, dispatcher, alert_threshold=ALERT_THRESHOLD)
             elapsed = time.perf_counter() - t0
-            state.last_result, state.last_elapsed = result, elapsed
-            send_message(token, chat_id, format_result(result, elapsed))
+            state.last_result, state.last_elapsed, state.last_mode = result, elapsed, "auto"
+            send_message(token, chat_id, format_result(result, elapsed, mode="auto"))
         except Exception:
             send_message(token, chat_id, f"⚠️ Erreur pendant le scan auto:\n{traceback.format_exc()[-1500:]}")
         finally:
             state.running = False
+            state.running_mode = None
+            state.running_since = None
             state.lock.release()
 
     scheduler = BackgroundScheduler()
@@ -159,7 +186,12 @@ def start_auto(state: ListenerState, dispatcher, token: str, chat_id: str) -> No
     scheduler.start()
     state.scheduler = scheduler
     state.auto_on = True
-    send_message(token, chat_id, f"🛰️ Scan auto activé — un cycle toutes les {AUTO_INTERVAL_MINUTES} min. /stop pour couper.")
+    send_message(
+        token, chat_id,
+        f"🛰️ Scan auto activé — un cycle toutes les {AUTO_INTERVAL_MINUTES} min "
+        f"(prochain vers {(_dt.datetime.now() + _dt.timedelta(minutes=AUTO_INTERVAL_MINUTES)).strftime('%H:%M')}). "
+        f"Tu reçois un message à chaque démarrage ET à chaque fin de scan. /stop pour couper.",
+    )
 
 
 def stop_auto(state: ListenerState, token: str, chat_id: str) -> None:
@@ -224,7 +256,7 @@ def main() -> None:
 
                 if text == "/run":
                     threading.Thread(
-                        target=run_and_report, args=(state, dispatcher, token, chat_id, True), daemon=True
+                        target=run_and_report, args=(state, dispatcher, token, chat_id), daemon=True
                     ).start()
                 elif text == "/auto":
                     start_auto(state, dispatcher, token, chat_id)
@@ -234,13 +266,21 @@ def main() -> None:
                     if state.last_result is None:
                         send_message(token, chat_id, "Pas encore de résultat en cache. /run pour en lancer un.")
                     else:
-                        send_message(token, chat_id, format_result(state.last_result, state.last_elapsed or 0.0))
+                        send_message(
+                            token, chat_id,
+                            format_result(state.last_result, state.last_elapsed or 0.0, mode=state.last_mode or "manuel"),
+                        )
                 elif text == "/status":
-                    bits = [
-                        "⏳ cycle en cours" if state.running else "💤 inactif",
-                        f"🛰️ auto {'ON' if state.auto_on else 'OFF'}",
-                    ]
-                    send_message(token, chat_id, " · ".join(bits))
+                    bits = [_busy_message(state) if state.running else "💤 inactif"]
+                    if state.auto_on and state.scheduler:
+                        jobs = state.scheduler.get_jobs()
+                        if jobs and jobs[0].next_run_time:
+                            bits.append(f"🛰️ auto ON — prochain scan vers {jobs[0].next_run_time.strftime('%H:%M')}")
+                        else:
+                            bits.append("🛰️ auto ON")
+                    else:
+                        bits.append("🛰️ auto OFF")
+                    send_message(token, chat_id, "\n".join(bits))
                 elif text in ("/help", "/start"):
                     send_message(token, chat_id, HELP_TEXT)
     finally:
