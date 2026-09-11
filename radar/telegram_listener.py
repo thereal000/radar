@@ -21,6 +21,12 @@ RADAR filters before it notifies (see radar/signals/decision.py): only
 opportunities worth acting on now are pushed automatically. Everything
 else stays reachable via /top instead of arriving as noise.
 
+Hackathon-tagged do_now opportunities also get a VERIFY pass (see
+radar/signals/verify_hackathon.py): RADAR tries to open the official page
+and read deadline/prize/your-own-GitHub-match info directly. If that page
+is behind an anti-bot check, RADAR does not try to get past it — it sends
+you a separate "can you check this one yourself" message instead.
+
 Only replies to the chat_id in .env.local — anyone else messaging the bot
 is ignored, so a stranger who finds the bot username can't trigger runs on
 your machine. Uses plain long-polling on Telegram's getUpdates via
@@ -41,6 +47,7 @@ import requests
 
 from radar.signals.decision import DO_NOW, WATCH, Decision, decide
 from radar.signals.store import RadarStore
+from radar.signals.verify_hackathon import HackathonVerification, verify_hackathon
 from run import ALERT_THRESHOLD, DEFAULT_QUERIES, build_dispatcher, load_env_local, run_once
 
 POLL_TIMEOUT = 30  # seconds, Telegram long-poll
@@ -127,7 +134,26 @@ def _card_keyboard(opp_id: str, include_detail: bool = True) -> list[list[dict]]
     return [row]
 
 
-def format_card(score, decision: Decision, is_new: bool) -> str:
+def _verification_lines(verification: HackathonVerification | None) -> list[str]:
+    """Only ever called with a non-blocked verification — a blocked one is
+    reported through its own heads-up message instead (see
+    format_blocked_notice), not folded into the card silently."""
+    if not verification or not verification.checked or verification.blocked:
+        return []
+    facts = []
+    if verification.deadline_text:
+        facts.append(verification.deadline_text)
+    if verification.prize_text:
+        facts.append(verification.prize_text)
+    if verification.github_matches:
+        top = verification.github_matches[0]
+        facts.append(f"ton repo \"{top['name']}\" correspond peut-être ({top['match_score']:.0f}%)")
+    if not facts:
+        return []
+    return ["", "Vérifié sur la page officielle:"] + [f"• {f}" for f in facts]
+
+
+def format_card(score, decision: Decision, is_new: bool, verification: HackathonVerification | None = None) -> str:
     """The rich notification: one opportunity, the essentials, nothing
     else. Used for auto-scan pushes and the #1 pick in a /run summary."""
     header = f"{_TIER_MARK[decision.tier]} {_TIER_LABEL[decision.tier]}"
@@ -139,10 +165,13 @@ def format_card(score, decision: Decision, is_new: bool) -> str:
         lines.append("Pourquoi:")
         for w in decision.why[:3]:
             lines.append(f"• {w}")
+    lines += _verification_lines(verification)
     return "\n".join(lines)
 
 
-def format_detail(score, decision: Decision, first_seen: str | None) -> str:
+def format_detail(
+    score, decision: Decision, first_seen: str | None, verification: HackathonVerification | None = None
+) -> str:
     """Full breakdown for ONE opportunity — the actual "approfondir"."""
     lines = [
         f"{_TIER_MARK.get(decision.tier, '⚪')} {_TIER_LABEL.get(decision.tier, 'Ignorée')}",
@@ -166,10 +195,28 @@ def format_detail(score, decision: Decision, first_seen: str | None) -> str:
         lines.append("")
         lines.append("Points de vigilance :")
         lines += [f"• {c}" for c in decision.concerns]
+    lines += _verification_lines(verification)
+    if verification and verification.blocked:
+        lines.append("")
+        lines.append("🔒 Page officielle protégée (anti-bot) — vérifie toi-même :")
+        lines.append(verification.official_url or "")
     if score.representative_url:
         lines.append("")
         lines.append(score.representative_url)
     return "\n".join(lines)
+
+
+def format_blocked_notice(score, verification: HackathonVerification) -> str:
+    """Sent as its own message the moment a hackathon page turns out to be
+    behind an anti-bot/login check — this project never tries to get past
+    one, it hands the check back to the user instead."""
+    return (
+        f"🔒 Vérification bloquée\n"
+        f"\"{_snippet(score, 90)}\"\n\n"
+        f"La page officielle est protégée (anti-bot ou connexion requise) — "
+        f"je ne peux pas la lire automatiquement. Tu veux bien checker toi-même ?\n"
+        f"{verification.official_url or ''}"
+    )
 
 
 def _teaser_button(score, decision: Decision) -> dict:
@@ -203,7 +250,9 @@ def actionable_opportunities(
     return do_now, watch
 
 
-def format_run_summary(result, elapsed: float, do_now, watch) -> tuple[str, list[list[dict]]]:
+def format_run_summary(
+    result, elapsed: float, do_now, watch, verification_by_id: dict | None = None
+) -> tuple[str, list[list[dict]]]:
     """Header text + keyboard for /run's response: the best pick gets the
     full card inline, up to 2 more get one-line buttons, watch-tier stays
     a single count — never a dump of everything found."""
@@ -216,7 +265,8 @@ def format_run_summary(result, elapsed: float, do_now, watch) -> tuple[str, list
         return header + note, []
 
     best_score, best_decision = do_now[0]
-    body = format_card(best_score, best_decision, best_score.is_new)
+    verification = (verification_by_id or {}).get(best_score.opportunity_id)
+    body = format_card(best_score, best_decision, best_score.is_new, verification)
     keyboard = _card_keyboard(best_score.opportunity_id)
 
     for score, decision in do_now[1:3]:
@@ -242,9 +292,26 @@ class ListenerState:
         self.scheduler = None
         self.lock = threading.Lock()  # serializes /run against the auto-scan job — both hit the same SQLite file
         self.score_by_id: dict[str, object] = {}  # refreshed on every scan/list — resolves button taps
+        self.verification_by_id: dict[str, HackathonVerification] = {}  # memoized — never re-fetch the same page
 
     def cache_scores(self, result) -> None:
         self.score_by_id = {s.opportunity_id: s for s in result.scores}
+
+
+def _verify_do_now(state: ListenerState, token: str, chat_id: str, do_now) -> None:
+    """Runs VERIFY only for do_now-tier, hackathon-tagged opportunities —
+    a real network fetch, so it must never run over the full batch, only
+    the handful that already passed DECIDE. Memoized so a repeat /top or a
+    later scan doesn't re-fetch the same page."""
+    for score, _decision in do_now:
+        if "hackathon_or_competition" not in score.relevance_reasons:
+            continue
+        if score.opportunity_id in state.verification_by_id:
+            continue
+        result = verify_hackathon(score)
+        state.verification_by_id[score.opportunity_id] = result
+        if result.blocked:
+            send_message(token, chat_id, format_blocked_notice(score, result))
 
 
 def _busy_message(state: ListenerState) -> str:
@@ -272,7 +339,8 @@ def run_and_report(state: ListenerState, dispatcher, token: str, chat_id: str) -
         state.last_result, state.last_mode = result, "manuel"
         state.cache_scores(result)
         do_now, watch = actionable_opportunities(result, state.store)
-        text, keyboard = format_run_summary(result, elapsed, do_now, watch)
+        _verify_do_now(state, token, chat_id, do_now)
+        text, keyboard = format_run_summary(result, elapsed, do_now, watch, state.verification_by_id)
         send_message(token, chat_id, text, keyboard)
     except Exception:
         send_message(token, chat_id, f"⚠️ Erreur pendant le scan manuel:\n{traceback.format_exc()[-1500:]}")
@@ -312,10 +380,12 @@ def start_auto(state: ListenerState, dispatcher, token: str, chat_id: str) -> No
             if not new_do_now:
                 print("[telegram] auto-scan done, nothing new to push — staying quiet")
                 return
+            _verify_do_now(state, token, chat_id, new_do_now)
             for score, decision in new_do_now:
+                verification = state.verification_by_id.get(score.opportunity_id)
                 send_message(
                     token, chat_id,
-                    format_card(score, decision, is_new=True),
+                    format_card(score, decision, is_new=True, verification=verification),
                     _card_keyboard(score.opportunity_id),
                 )
         except Exception:
@@ -361,6 +431,7 @@ def send_top(state: ListenerState, token: str, chat_id: str) -> None:
     if not do_now and not watch:
         send_message(token, chat_id, "Rien d'actionnable en ce moment. /run pour rescanner.")
         return
+    _verify_do_now(state, token, chat_id, do_now)
 
     lines = []
     keyboard = []
@@ -392,9 +463,10 @@ def handle_callback(state: ListenerState, token: str, chat_id: str, callback_que
     if action == "detail":
         decision = decide(score)
         first_seen = state.store.get_first_seen(opp_id)
+        verification = state.verification_by_id.get(opp_id)
         answer_callback(token, cq_id)
         send_message(
-            token, chat_id, format_detail(score, decision, first_seen),
+            token, chat_id, format_detail(score, decision, first_seen, verification),
             _card_keyboard(opp_id, include_detail=False),
         )
     elif action in ("ignore", "done"):

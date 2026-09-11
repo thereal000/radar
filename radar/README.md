@@ -39,12 +39,17 @@ DECIDE      turns a score into one of three tiers: do it now / watch / not
             worth your time — weighing potential reward against apparent
             effort and risk, not just the raw score
      |
+VERIFY      hackathon opportunities only, for now: opens the official page
+            and reads deadline / prize / whether you've already got a
+            matching GitHub repo — real data, not another guess from the
+            original post's text
+     |
 NOTIFY      Telegram — only "do it now" gets pushed automatically; anything
             filtered out stays reachable on request instead of arriving as
             noise
 ```
 
-Everything through SCORE reuses mature, maintained open-source libraries (see [Sources / third-party components](#third-party-components) below) instead of reimplementing collection, dedup, clustering, or change-point detection from scratch — that's a deliberate project rule (`CLAUDE.md`: reuse what's solved, build only what's specific to this radar). DECIDE and NOTIFY are the two stages actually written for this project on top of that, plus the scoring model itself.
+Everything through SCORE reuses mature, maintained open-source libraries (see [Sources / third-party components](#third-party-components) below) instead of reimplementing collection, dedup, clustering, or change-point detection from scratch — that's a deliberate project rule (`CLAUDE.md`: reuse what's solved, build only what's specific to this radar). DECIDE, VERIFY and NOTIFY are the stages actually written for this project on top of that, plus the scoring model itself.
 
 ## What makes it different
 
@@ -54,6 +59,7 @@ Most alert bots forward every keyword match. RADAR filters before it notifies:
 - **It remembers what you did.** Tap "Ignorer" or "Faire maintenant" on Telegram and that opportunity won't be pushed at you again unless its score moves enough to mean the situation actually changed. No ML — just a remembered decision, the same cooldown logic the alert system already uses.
 - **Deduplication that understands "the same thing," not just "the same URL."** MinHash + fuzzy matching + shared entities, tuned against real false positives found while testing (a bare link with no text used to match everything; a short unrelated headline used to match a long tweet).
 - **A risk score that isn't a black box.** Every risk/relevance flag is a named, readable reason ("demande une adresse wallet", "urgence artificielle") you can see, not a hidden number.
+- **Hackathons get checked against their real page, not just guessed from a tweet.** When something tagged as a hackathon clears the `do_now` bar, RADAR opens the official page and reads the actual deadline/prize text, and checks your own GitHub repos for a likely match — see `radar/signals/verify_hackathon.py`. If that page turns out to be behind an anti-bot or login check, RADAR doesn't try to get past it — it sends you a separate message asking you to check it yourself.
 
 ## Telegram workflow
 
@@ -105,6 +111,7 @@ radar/
     risk.py           rule-based scam-risk assessment
     scoring.py        combines the above into opportunity_score
     decision.py       score -> do_now / watch / ignore, with human-readable reasons
+    verify_hackathon.py  opens a hackathon's official page for real deadline/prize/GitHub-match info
     alerts.py         desktop toast + JSONL audit log (Apprise)
     scheduler.py      APScheduler wiring for periodic runs
     orchestrator.py   one full cycle: pipeline -> store -> score -> alert
@@ -212,7 +219,8 @@ Built with significant assistance from **Claude (Anthropic's Claude Code)**, use
 
 - Cross-run opportunity matching (telling "the same real opportunity" apart from "a new one") is a heuristic, not perfect — it can occasionally split one opportunity in two, or merge two similar-but-different ones.
 - The relevance/risk/decision heuristics are hand-tuned against a limited amount of real data so far, and English-centric — they'll miss things phrased unusually or in other languages.
-- RADAR detects and scores; it doesn't yet verify against the opportunity's own source (official rules page, real deadline, eligibility) before notifying — that's the next thing to build, not something it currently claims to do.
+- Verification against the opportunity's own official page currently only exists for hackathons (`verify_hackathon.py`). Airdrops, free-credit programs, and events are detected and scored, but not yet fact-checked against their own source before notifying — that's the logical next one to build, using the same pattern.
+- Deadline/prize extraction from a fetched page is regex-based, best-effort — it reports what it found in the page text, not a guaranteed-correct fact. If a page is behind an anti-bot or login check, RADAR says so and asks you to check it yourself rather than trying to get past it.
 - X/Reddit collection depends on a logged-in browser session (`opencli`), the least "zero-setup" part of the stack — the other four sources need no authentication at all.
 
 ## License
