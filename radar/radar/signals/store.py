@@ -110,7 +110,18 @@ class RadarStore:
             conn.commit()
 
     def _connect(self) -> sqlite3.Connection:
-        return sqlite3.connect(self.db_path)
+        # Default busy timeout is 5s — too short for real usage: persist_run()
+        # can hold a write lock for tens of seconds on a big cycle (hundreds
+        # of INSERTs across ~1800+ clusters), and a Telegram button tap can
+        # land a read on a fresh connection at the same time (it isn't
+        # covered by telegram_listener's scan lock, which only serializes
+        # scan-vs-scan). Found via a real crash: a callback's get_first_seen
+        # hit "database is locked" moments after a scan finished writing,
+        # and took the whole bot process down with it (see the
+        # never-crash-the-poll-loop fix in telegram_listener.py — this is
+        # the other half of that fix, removing the actual cause instead of
+        # just surviving it).
+        return sqlite3.connect(self.db_path, timeout=30.0)
 
     def _existing_opportunities(self, conn: sqlite3.Connection) -> list[StoredOpportunity]:
         rows = conn.execute(

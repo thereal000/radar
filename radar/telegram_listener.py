@@ -491,6 +491,46 @@ HELP_TEXT = (
 )
 
 
+def _dispatch_update(state: ListenerState, dispatcher, token: str, chat_id: str, update: dict) -> None:
+    callback_query = update.get("callback_query")
+    if callback_query:
+        from_chat = str((callback_query.get("message") or {}).get("chat", {}).get("id", ""))
+        if from_chat == str(chat_id):
+            handle_callback(state, token, chat_id, callback_query)
+        return
+
+    message = update.get("message") or {}
+    from_chat = str(message.get("chat", {}).get("id", ""))
+    text = (message.get("text") or "").strip()
+
+    if from_chat != str(chat_id):
+        return  # ignore anyone but the configured owner
+
+    if text == "/run":
+        threading.Thread(
+            target=run_and_report, args=(state, dispatcher, token, chat_id), daemon=True
+        ).start()
+    elif text == "/auto":
+        start_auto(state, dispatcher, token, chat_id)
+    elif text == "/stop":
+        stop_auto(state, token, chat_id)
+    elif text == "/top":
+        send_top(state, token, chat_id)
+    elif text == "/status":
+        bits = [_busy_message(state) if state.running else "💤 inactif"]
+        if state.auto_on and state.scheduler:
+            jobs = state.scheduler.get_jobs()
+            if jobs and jobs[0].next_run_time:
+                bits.append(f"🛰️ auto ON — prochain scan vers {jobs[0].next_run_time.strftime('%H:%M')}")
+            else:
+                bits.append("🛰️ auto ON")
+        else:
+            bits.append("🛰️ auto OFF")
+        send_message(token, chat_id, "\n".join(bits))
+    elif text in ("/help", "/start"):
+        send_message(token, chat_id, HELP_TEXT)
+
+
 # ---------------------------------------------------------------------------
 # Main loop
 # ---------------------------------------------------------------------------
@@ -527,44 +567,19 @@ def main() -> None:
 
             for update in updates:
                 offset = update["update_id"] + 1
-
-                callback_query = update.get("callback_query")
-                if callback_query:
-                    from_chat = str((callback_query.get("message") or {}).get("chat", {}).get("id", ""))
-                    if from_chat == str(chat_id):
-                        handle_callback(state, token, chat_id, callback_query)
-                    continue
-
-                message = update.get("message") or {}
-                from_chat = str(message.get("chat", {}).get("id", ""))
-                text = (message.get("text") or "").strip()
-
-                if from_chat != str(chat_id):
-                    continue  # ignore anyone but the configured owner
-
-                if text == "/run":
-                    threading.Thread(
-                        target=run_and_report, args=(state, dispatcher, token, chat_id), daemon=True
-                    ).start()
-                elif text == "/auto":
-                    start_auto(state, dispatcher, token, chat_id)
-                elif text == "/stop":
-                    stop_auto(state, token, chat_id)
-                elif text == "/top":
-                    send_top(state, token, chat_id)
-                elif text == "/status":
-                    bits = [_busy_message(state) if state.running else "💤 inactif"]
-                    if state.auto_on and state.scheduler:
-                        jobs = state.scheduler.get_jobs()
-                        if jobs and jobs[0].next_run_time:
-                            bits.append(f"🛰️ auto ON — prochain scan vers {jobs[0].next_run_time.strftime('%H:%M')}")
-                        else:
-                            bits.append("🛰️ auto ON")
-                    else:
-                        bits.append("🛰️ auto OFF")
-                    send_message(token, chat_id, "\n".join(bits))
-                elif text in ("/help", "/start"):
-                    send_message(token, chat_id, HELP_TEXT)
+                # A crash handling ONE update must never take the whole bot
+                # down — found the hard way: a callback hit "database is
+                # locked" and the unguarded exception killed the process,
+                # silently, with no restart. Every update is now isolated.
+                try:
+                    _dispatch_update(state, dispatcher, token, chat_id, update)
+                except Exception:
+                    tb = traceback.format_exc()
+                    print(f"[telegram] unhandled error processing an update:\n{tb}")
+                    try:
+                        send_message(token, chat_id, f"⚠️ Erreur interne (ignorée, le bot continue de tourner):\n{tb[-800:]}")
+                    except Exception:
+                        pass
     finally:
         if state.scheduler:
             state.scheduler.shutdown(wait=False)
