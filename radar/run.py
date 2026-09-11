@@ -1,13 +1,15 @@
 """Simple launcher for RADAR.
 
 Usage:
-    run.py                 one cycle, prints results, sends alerts (desktop + Telegram if configured)
+    run.py                 one cycle, prints results, sends a Windows desktop toast
     run.py --loop          runs continuously every 30 min (Ctrl+C to stop)
     run.py --loop 10       runs continuously every 10 min
 
-Telegram: put TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env.local
-(gitignored, never committed) to receive alerts there too. Without it,
-only the Windows desktop toast fires.
+For Telegram, run telegram_listener.py instead (or alongside): it owns all
+Telegram formatting/delivery (the readable, tiered cry4scan messages).
+Wiring a raw tgram:// URL into this dispatcher too would double-send —
+once here with a bare title, once from the bot with the real formatting —
+so this launcher's dispatcher stays desktop-toast only.
 """
 from __future__ import annotations
 
@@ -49,16 +51,9 @@ def load_env_local() -> dict[str, str]:
 
 
 def build_dispatcher() -> AlertDispatcher:
-    env = load_env_local()
-    extra_urls = []
-    token = env.get("TELEGRAM_BOT_TOKEN")
-    chat_id = env.get("TELEGRAM_CHAT_ID")
-    if token and chat_id:
-        extra_urls.append(f"tgram://{token}/{chat_id}")
-        print("[run] Telegram alerts: enabled")
-    else:
-        print("[run] Telegram alerts: not configured (.env.local missing TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID)")
-    return AlertDispatcher(enable_desktop_toast=True, extra_apprise_urls=extra_urls)
+    # Desktop toast + JSONL audit log only — see module docstring for why
+    # Telegram isn't wired in here.
+    return AlertDispatcher(enable_desktop_toast=True, extra_apprise_urls=[])
 
 
 def run_once(dispatcher: AlertDispatcher | None = None):

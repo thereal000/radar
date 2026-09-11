@@ -87,6 +87,15 @@ def _compute_money_score(text: str) -> float:
     return _squash(hits, saturate_at=5)
 
 
+def _extract_money_mention(text: str) -> str:
+    """First literal $/amount mention as written, for display — not a
+    verified reward figure, just what the source text actually says."""
+    if not text:
+        return ""
+    m = _MONEY_MENTION_RE.search(text)
+    return m.group(0).strip() if m else ""
+
+
 @dataclass
 class OpportunityScore:
     opportunity_id: str
@@ -124,6 +133,7 @@ class OpportunityScore:
     # DB lookup
     representative_text: str = ""
     representative_url: str = ""
+    money_mention: str = ""  # e.g. "$500" or "50 USDC", as written in the source text — "" if none found
 
     # set by the orchestrator after persist_run, since score_opportunity()
     # itself has no notion of "new vs already stored" — lets callers tell a
@@ -212,4 +222,5 @@ def score_opportunity(cluster: Cluster, opportunity_id: str, snapshots: list[dic
         opportunity_score=round(opportunity_score, 3),
         representative_text=(cluster.representative.text or cluster.representative.title or "")[:300],
         representative_url=cluster.representative.canonical_url or cluster.representative.url or "",
+        money_mention=_extract_money_mention(combined_text),
     )

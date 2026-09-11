@@ -1,75 +1,121 @@
 # cry4radar
 
-**A radar that watches X, Reddit, GitHub, Hacker News, YouTube and RSS at once, and tells you which "free credits / airdrop / rewards" post is worth your time before it's everywhere.**
-
 Built for [First Commit — Beginner's Paradise](https://firstcommit.devpost.com/) (Devpost hackathon, Aug 21 – Sep 30, 2026).
 
----
+## What is RADAR?
 
-## The problem
+RADAR is a personal tool that watches six places on the internet for opportunities worth money or time — free credits, airdrops, hackathon prizes, referral rewards, grant programs — and tells you, on Telegram, when one is actually worth acting on. Not "here are 40 results," but "here are the 1-2 that pass the bar."
 
-"Free credits", airdrops, hackathon prizes, referral rewards, grant programs — these opportunities get posted across six different platforms, mixed in with noise, reposts, and outright scams. By the time something trends, it's usually too late to be "early." Manually checking X, Reddit, GitHub, Hacker News, YouTube and RSS feeds all day isn't realistic.
+## What does it monitor?
 
-**cry4radar** collects from all six sources in parallel, merges duplicate reports of the same real-world opportunity into one, scores each one for relevance / scam risk / how corroborated it is / how early it still is, and pushes the best ones to a Telegram bot you can also use to trigger scans remotely.
+X (Twitter), Reddit, GitHub, Hacker News, YouTube, and RSS feeds — searched in parallel on a schedule (or on demand).
+
+## Why does it exist?
+
+These opportunities show up across six different platforms, mixed in with noise, reposts, and outright scams. By the time something's trending, it's usually too late to be early. Checking six feeds by hand all day isn't realistic, and a bot that just forwards every keyword match is worse than nothing — it teaches you to ignore it.
 
 ## How it works
 
 ```
-COLLECT   (6 sources in parallel, ThreadPoolExecutor)
-    X / Reddit        -> OpenCLI (Agent Reach) browser-session collection
-    GitHub             -> gh CLI repo search
-    Hacker News        -> Algolia Search API
-    YouTube            -> yt-dlp flat search (no API key)
-    RSS                -> feedparser (Product Hunt by default)
-       |
-NORMALIZE   raw posts -> a single Signal shape (courlan URL canonicalization)
-       |
-DEDUP       datasketch MinHash/LSH + RapidFuzz fuzzy match + shared-entity blocking
-       |
-CLUSTER     union-find: signals about the same real opportunity -> one cluster
-       |
-PERSIST     SQLite — resolves each cluster to a stable opportunity_id across
-            runs, so the same opportunity is tracked over time instead of
-            re-created every cycle
-       |
-SCORE       relevance (keyword-concept lexicon) x source independence
-            (author/text/timing diversity) x risk (rule-based scam signals)
-            x velocity/trend (ruptures change-point detection) -> one
-            opportunity_score, plus a "Before-TikTok" earliness score
-       |
-ALERT       Apprise -> Windows desktop toast + Telegram, with a cooldown so
-            the same still-live opportunity doesn't spam you every cycle
-       |
-SCHEDULE    APScheduler — run automatically every N minutes, or trigger a
-            scan on demand from Telegram
+COLLECT     6 sources in parallel (X/Reddit via OpenCLI, GitHub via gh CLI,
+            Hacker News via Algolia, YouTube via yt-dlp, RSS via feedparser)
+     |
+NORMALIZE   raw platform posts -> one common Signal shape
+     |
+DEDUP       MinHash near-duplicate text + fuzzy matching + shared-entity
+            blocking -> the same real opportunity reported by five people
+            becomes one cluster, not five results
+     |
+PERSIST     SQLite resolves each cluster to a stable opportunity_id across
+            runs, so the same real opportunity is tracked over time instead
+            of re-created every cycle
+     |
+SCORE       relevance (is this actually about an opportunity, or did a
+            keyword just match) x source independence (genuinely different
+            people, or one account reposting itself) x risk (rule-based
+            scam signals) x velocity/trend -> opportunity_score
+     |
+DECIDE      turns a score into one of three tiers: do it now / watch / not
+            worth your time — weighing potential reward against apparent
+            effort and risk, not just the raw score
+     |
+NOTIFY      Telegram — only "do it now" gets pushed automatically; anything
+            filtered out stays reachable on request instead of arriving as
+            noise
 ```
 
-Everything above the SCORE stage reuses mature, maintained open-source libraries (see [Third-party components](#third-party-components) / `NOTICE.md`) rather than reimplementing collection, dedup, clustering, change-point detection, or alert delivery from scratch — that's a deliberate project rule, see `CLAUDE.md`. The scoring model, the risk/relevance/independence heuristics, the cross-run identity resolution, and the Telegram bot are the actually radar-specific logic written for this project.
+Everything through SCORE reuses mature, maintained open-source libraries (see [Sources / third-party components](#third-party-components) below) instead of reimplementing collection, dedup, clustering, or change-point detection from scratch — that's a deliberate project rule (`CLAUDE.md`: reuse what's solved, build only what's specific to this radar). DECIDE and NOTIFY are the two stages actually written for this project on top of that, plus the scoring model itself.
 
-## What's original vs. what's reused
+## What makes it different
 
-| Reused (open source) | Written for this project |
+Most alert bots forward every keyword match. RADAR filters before it notifies:
+
+- **Tiered decisions, not a raw feed.** Each opportunity is classified `do_now`, `watch`, or `ignore` from its reward-vs-effort-vs-risk estimate — see `radar/signals/decision.py`. Only `do_now` gets pushed to you unasked.
+- **It remembers what you did.** Tap "Ignorer" or "Faire maintenant" on Telegram and that opportunity won't be pushed at you again unless its score moves enough to mean the situation actually changed. No ML — just a remembered decision, the same cooldown logic the alert system already uses.
+- **Deduplication that understands "the same thing," not just "the same URL."** MinHash + fuzzy matching + shared entities, tuned against real false positives found while testing (a bare link with no text used to match everything; a short unrelated headline used to match a long tweet).
+- **A risk score that isn't a black box.** Every risk/relevance flag is a named, readable reason ("demande une adresse wallet", "urgence artificielle") you can see, not a hidden number.
+
+## Telegram workflow
+
+The bot is `cry4scan`. Every opportunity comes with three buttons:
+
+```
+🔥 Faisable maintenant
+"Free credits worth $500 for new signups, apply before Friday"
+$500 · effort faible · twitter/youtube
+
+Pourquoi:
+• récompense annoncée
+• places limitées ou deadline
+
+[🔎 Approfondir]  [✅ Faire maintenant]  [🚫 Ignorer]
+```
+
+- **Approfondir** — full detail for *that one opportunity*: score breakdown, why it was flagged, risk concerns if any, when it was first detected, the source link. Not the whole list again.
+- **Faire maintenant** — marks it as taken care of so it stops being pushed. RADAR never submits forms, connects a wallet, or acts on your behalf — this button is a bookmark, not automation of the actual opportunity.
+- **Ignorer** — same idea, the other direction: stop pushing this specific one.
+
+Commands:
+
+| Command | Does |
 |---|---|
-| Collection, dedup primitives, change-point detection, scheduling, alert delivery | Scoring model (relevance × independence × risk × velocity) |
-| | Cross-run opportunity identity (same real-world thing tracked over days, not re-created every cycle) |
-| | Scam-risk heuristics (urgency language, wallet-address requests, low source independence) |
-| | The Telegram bot (`cry4scan`): commands, auto-scan scheduling, message formatting |
-| | Per-source rate/limit tuning and the parallel collection pipeline itself |
+| `/run` | scan now — short summary: what's actionable, best pick with full detail, a couple more as one-tap buttons |
+| `/auto` | scan every 30 minutes automatically — completely silent unless something clears the `do_now` bar |
+| `/stop` | turn auto-scan off |
+| `/top` | current actionable list (do_now + watch), one button per opportunity |
+| `/status` | is a scan running, is auto-scan on, when's the next one |
+| `/help` | this list |
 
-## Features
+## Architecture
 
-- **6 sources collected in parallel** — a full cycle (14 search queries × 6 sources) finishes in ~4–7 minutes instead of running each source sequentially.
-- **Real deduplication**, not just "same URL": MinHash near-duplicate text detection + fuzzy matching + shared named-entity blocking, tuned against real false positives found during testing (e.g. a bare link with no text used to falsely match everything; a short unrelated title used to falsely match a long tweet).
-- **Opportunity scoring**, not just engagement counts:
-  - `relevance_score` — is this actually about credits/rewards/airdrops, via a keyword-concept lexicon (plural-aware)
-  - `source_independence` — is this corroborated by genuinely different people, or does it look like one account/bot ring reposting itself
-  - `risk_score` / `risk_level` — rule-based scam signals (urgency language, "send your wallet address", compounds when independence is low)
-  - `before_tiktok_score` — earliness × relevance, so being early only counts if it's actually on-topic
-- **Cross-run identity**: the same real opportunity keeps the same internal ID across cycles, so the radar can tell you it's a 🆕 brand-new find vs. something already reported on an earlier scan — instead of the same still-live post looking like repeated spam every 30 minutes.
-- **Telegram bot ("cry4scan")**: trigger scans, turn on a 30-minute auto-scan, and get results with real post content (not just bare numbers) — remotely, from anywhere.
-- **Alert cooldown**: won't re-alert the same unchanged opportunity for 24h unless its score moves meaningfully.
+```
+radar/
+  signals/
+    schema.py        Signal — the common shape every source normalizes into
+    collectors.py     one function per source (X, Reddit, GitHub, HN, YouTube, RSS)
+    normalize.py      raw platform post -> Signal
+    clean.py          text cleaning
+    dedup.py          MinHash + fuzzy + entity duplicate evidence
+    cluster.py        union-find clustering into opportunities
+    pipeline.py        COLLECT -> NORMALIZE -> DEDUP -> CLUSTER, 6 sources in parallel
+    store.py          SQLite: cross-run opportunity identity, alert cooldown, decisions
+    velocity.py       change-point trend classification (accelerating/steady/saturating)
+    relevance.py      keyword-concept relevance scoring
+    independence.py   source/author/timing independence scoring
+    risk.py           rule-based scam-risk assessment
+    scoring.py        combines the above into opportunity_score
+    decision.py       score -> do_now / watch / ignore, with human-readable reasons
+    alerts.py         desktop toast + JSONL audit log (Apprise)
+    scheduler.py      APScheduler wiring for periodic runs
+    orchestrator.py   one full cycle: pipeline -> store -> score -> alert
+  tests/              pytest
+run.py                 launcher: one cycle, or --loop for continuous
+run.bat                double-click launcher (Windows)
+telegram_listener.py   the cry4scan Telegram bot (owns all Telegram formatting/delivery)
+telegram_listener.bat  double-click launcher (Windows)
+```
 
-## Tech stack
+## Sources / third-party components
 
 | Layer | Technology |
 |---|---|
@@ -85,54 +131,21 @@ Everything above the SCORE stage reuses mature, maintained open-source libraries
 | Near-duplicate detection | [datasketch](https://github.com/ekzhu/datasketch) (MinHash/LSH) |
 | Fuzzy text matching | [RapidFuzz](https://github.com/rapidfuzz/RapidFuzz) |
 | Trend / change-point detection | [ruptures](https://github.com/deepcharles/ruptures) |
-| Alert delivery | [Apprise](https://github.com/caronc/apprise) (desktop toast + Telegram, 100+ services supported) |
+| Desktop notifications | [Apprise](https://github.com/caronc/apprise) (Windows toast) |
 | Scheduling | [APScheduler](https://github.com/agronholm/apscheduler) (3.x) |
-| Remote control | [Telegram Bot API](https://core.telegram.org/bots/api) via `requests` (long polling) |
-| Tests | pytest (50 tests, synthetic/deterministic fixtures) |
+| Telegram bot | [Telegram Bot API](https://core.telegram.org/bots/api) via `requests` (long polling + inline keyboards) |
+| Tests | pytest |
 
-Full license/attribution table: [`NOTICE.md`](NOTICE.md).
+Full license/attribution table: [`NOTICE.md`](NOTICE.md). Nothing is vendored or copied — everything is installed as a normal dependency and used through its public API, per the project's [open-source-first rule](CLAUDE.md).
 
-## Project structure
-
-```
-radar/
-  signals/
-    schema.py        Signal dataclass — the common shape every source normalizes into
-    collectors.py     one function per source (X, Reddit, GitHub, HN, YouTube, RSS)
-    normalize.py      raw platform post -> Signal
-    clean.py          text cleaning
-    dedup.py          MinHash + fuzzy + entity duplicate evidence
-    cluster.py        union-find clustering into opportunities
-    pipeline.py        COLLECT -> NORMALIZE -> DEDUP -> CLUSTER, 6 sources in parallel
-    store.py          SQLite persistence + cross-run opportunity identity
-    velocity.py       change-point trend classification (accelerating/steady/saturating)
-    relevance.py      keyword-concept relevance scoring
-    independence.py   source/author/timing independence scoring
-    risk.py           rule-based scam-risk assessment
-    scoring.py        combines all of the above into opportunity_score
-    alerts.py         Apprise dispatch (desktop + Telegram)
-    scheduler.py      APScheduler wiring for periodic runs
-    orchestrator.py   one full cycle: pipeline -> store -> score -> alert
-  tests/              pytest, 50 tests
-  scripts/            benchmark/observation scripts used during development
-run.py                 launcher: one cycle, or --loop for continuous
-run.bat                double-click launcher (Windows)
-telegram_listener.py   the cry4scan Telegram bot
-telegram_listener.bat  double-click launcher (Windows)
-```
-
-## Setup
-
-### 1. Requirements
+## Installation
 
 ```
 python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 ```
 
-### 2. Sources that need authentication
-
-The radar degrades gracefully — you don't need all six sources working to run it.
+RADAR degrades gracefully — you don't need all six sources working.
 
 | Source | Needs | Setup |
 |---|---|---|
@@ -140,31 +153,29 @@ The radar degrades gracefully — you don't need all six sources working to run 
 | X / Reddit | `opencli` (Agent Reach), a real browser session | see below |
 | Hacker News, YouTube, RSS | nothing | works out of the box |
 
-For X/Reddit: install [`opencli`](https://github.com/Panniantong/Agent-Reach) (`npm i -g opencli`), then open a browser session and log into x.com / reddit.com once — the session persists for later runs:
+For X/Reddit: install [`opencli`](https://github.com/Panniantong/Agent-Reach) (`npm i -g opencli`), then log into x.com / reddit.com once through it — the session persists for later runs:
 
 ```
-opencli doctor                       # checks the browser bridge is connected
+opencli doctor
 opencli browser radar open https://x.com/login
 opencli browser radar open https://reddit.com/login
 ```
 
-If these aren't set up, `run.py` still works — it just collects from the other four sources.
+Without this, `run.py` still works — it just collects from the other four sources.
 
-### 3. (Optional) Telegram bot
+## Configuration
 
-Create `.env.local` in the project root (already gitignored — never commit real tokens):
+For the Telegram bot, create `.env.local` in the project root (gitignored — never commit real tokens):
 
 ```
 TELEGRAM_BOT_TOKEN=your_bot_token
 TELEGRAM_CHAT_ID=your_chat_id
 ```
 
-- Get a bot token from [@BotFather](https://t.me/BotFather) on Telegram (`/newbot`).
-- Get your chat ID: message your new bot once, then visit
-  `https://api.telegram.org/bot<TOKEN>/getUpdates` and read `message.chat.id`
-  from the JSON response.
+- Get a bot token from [@BotFather](https://t.me/BotFather) (`/newbot`).
+- Get your chat ID: message your new bot once, then visit `https://api.telegram.org/bot<TOKEN>/getUpdates` and read `message.chat.id` from the response.
 
-Without this file, `run.py` still works and alerts via Windows desktop toast only.
+Without this file, `run.py` still works and alerts via Windows desktop toast only. Query list and the do_now/watch thresholds live in `run.py` (`DEFAULT_QUERIES`, `ALERT_THRESHOLD`) and `radar/signals/decision.py` if you want to tune them.
 
 ## Running
 
@@ -174,62 +185,35 @@ Without this file, `run.py` still works and alerts via Windows desktop toast onl
 ```
 or double-click `run.bat`.
 
-**Continuous, every 30 minutes:**
+**Continuous, every 30 minutes, no Telegram:**
 ```
 .venv\Scripts\python run.py --loop
 ```
 
-**Telegram bot** (lets you trigger/monitor scans remotely, from your phone):
+**Telegram bot** (the actual day-to-day interface):
 ```
 .venv\Scripts\python telegram_listener.py
 ```
-or double-click `telegram_listener.bat`. Message your bot `/help` for the full command list:
+or double-click `telegram_listener.bat`. See [Telegram workflow](#telegram-workflow) above for the commands.
 
-| Command | Does |
-|---|---|
-| `/run` | scan now |
-| `/auto` | turn on a scan every 30 minutes |
-| `/stop` | turn auto-scan off |
-| `/top` | resend the last result instantly (no new scan) |
-| `/status` | is a scan running right now, and when's the next auto-scan |
-| `/help` | this list |
+`/run` and the auto-scan share a lock so two scans never write to the SQLite store at the same time.
 
-`/run` and the auto-scan share a lock so two scans never write to the SQLite store at the same time — you'll get a clear "a scan is already running" message instead of silent corruption.
+## Tests
 
-**Tests:**
 ```
 .venv\Scripts\python -m pytest
 ```
 
-## Reading the results
-
-Each opportunity in a Telegram report shows:
-
-```
-✅ 1. 0.40 · twitter/youtube · 12 sig · risque LOW 🆕
-    "Big airdrop campaign launching next week for early testers..."
-    https://x.com/example/status/123
-```
-
-- **✅ / ❔** — validated (low scam risk + clearly on-topic) vs. worth double-checking yourself
-- **🆕** — the first time the radar has seen this specific opportunity
-- **score** — `opportunity_score`: composite engagement/velocity/diversity/recency, discounted for off-topic content and for scam risk
-- **sig** — how many independent posts across platforms are talking about this
-- **risque** — `LOW` / `MEDIUM` / `HIGH`, from the rule-based risk assessment
-
-## Third-party components
-
-See [`NOTICE.md`](NOTICE.md) for the full list with licenses. Nothing is vendored or copied — everything is installed as a normal dependency (pip, npm, or an external CLI) and used through its public API, with attribution preserved as required by each license.
-
 ## AI usage disclosure
 
-This project was built with significant assistance from **Claude (Anthropic's Claude Code)**, used as a pair-programming assistant throughout: architecture decisions, implementation, debugging real issues found while testing against live data, and iterating on the scoring model and the Telegram bot. Every feature was directed, reviewed, and tested by the author; the open-source-first approach, the specific scoring heuristics, and what counts as "risky" or "relevant" were project decisions made by the author, not left to the AI to invent unsupervised. Chat history is available on request per the hackathon rules.
+Built with significant assistance from **Claude (Anthropic's Claude Code)**, used as a pair-programming assistant throughout: architecture, implementation, debugging real issues found while testing against live data, and iterating on the scoring model and the Telegram bot. Every feature was directed, reviewed, and tested by the author; the open-source-first approach, the specific scoring/decision heuristics, and what counts as "risky" or "worth pushing" were project decisions made by the author, not left to the AI to invent unsupervised. Chat history available on request per the hackathon rules.
 
 ## Known limitations
 
 - Cross-run opportunity matching (telling "the same real opportunity" apart from "a new one") is a heuristic, not perfect — it can occasionally split one opportunity in two, or merge two similar-but-different ones.
-- The relevance/risk keyword lexicons are hand-built and English-centric; they'll miss things phrased unusually or in other languages.
-- X/Reddit collection depends on a logged-in browser session (`opencli`), which is the least "zero-setup" part of the stack — the other four sources need no authentication at all.
+- The relevance/risk/decision heuristics are hand-tuned against a limited amount of real data so far, and English-centric — they'll miss things phrased unusually or in other languages.
+- RADAR detects and scores; it doesn't yet verify against the opportunity's own source (official rules page, real deadline, eligibility) before notifying — that's the next thing to build, not something it currently claims to do.
+- X/Reddit collection depends on a logged-in browser session (`opencli`), the least "zero-setup" part of the stack — the other four sources need no authentication at all.
 
 ## License
 

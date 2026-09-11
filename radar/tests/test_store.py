@@ -89,3 +89,30 @@ def test_should_alert_true_when_score_jumps_significantly():
     store.mark_alerted("opp1", 0.5)
     assert store.should_alert("opp1", 0.5) is False
     assert store.should_alert("opp1", 0.7) is True  # +0.2 delta clears the min_score_delta bar
+
+
+def test_record_decision_persists_and_is_retrievable():
+    store = _tmp_store()
+    assert store.get_decisions() == {}
+    store.record_decision("opp1", "ignore", 0.4)
+    store.record_decision("opp2", "done", 0.5)
+    decisions = store.get_decisions()
+    assert decisions["opp1"] == ("ignore", 0.4)
+    assert decisions["opp2"] == ("done", 0.5)
+
+
+def test_record_decision_overwrites_previous_decision_for_same_opportunity():
+    store = _tmp_store()
+    store.record_decision("opp1", "ignore", 0.4)
+    store.record_decision("opp1", "done", 0.6)
+    decisions = store.get_decisions()
+    assert decisions["opp1"] == ("done", 0.6)
+
+
+def test_get_first_seen_returns_iso_timestamp_for_known_opportunity():
+    store = _tmp_store()
+    clusters = build_clusters([_tweet("a1", "ProjectX airdrop of $500 USDC is live now")])
+    mapping, _, _ = store.persist_run(clusters)
+    opp_id = next(iter(mapping.values()))
+    assert store.get_first_seen(opp_id) is not None
+    assert store.get_first_seen("nonexistent") is None

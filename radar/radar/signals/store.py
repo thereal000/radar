@@ -78,6 +78,13 @@ CREATE TABLE IF NOT EXISTS alert_history (
     last_alerted_score REAL NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS decisions (
+    opportunity_id TEXT PRIMARY KEY,
+    action TEXT NOT NULL,
+    decided_at TEXT NOT NULL,
+    score_at_decision REAL NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_snapshots_opportunity ON opportunity_snapshots(opportunity_id, snapshot_at);
 """
 
@@ -262,6 +269,13 @@ class RadarStore:
             for r in rows
         ]
 
+    def get_first_seen(self, opportunity_id: str) -> str | None:
+        with closing(self._connect()) as conn:
+            row = conn.execute(
+                "SELECT first_seen FROM opportunities WHERE opportunity_id=?", (opportunity_id,)
+            ).fetchone()
+        return row[0] if row else None
+
     def list_opportunities(self) -> list[str]:
         with closing(self._connect()) as conn:
             return [r[0] for r in conn.execute("SELECT opportunity_id FROM opportunities")]
@@ -285,6 +299,30 @@ class RadarStore:
         if hours_since >= cooldown_hours:
             return True
         return abs(score - last_score) >= min_score_delta
+
+    def record_decision(self, opportunity_id: str, action: str, score: float) -> None:
+        """Records what the user did with an opportunity (from a Telegram
+        button: 'ignore' or 'done'). Used to stop re-surfacing something
+        they've already dismissed or acted on — the closest thing to
+        'learning from actions' this project does, deliberately without ML
+        per project instruction: a plain remembered decision, re-opened
+        only if the score moves enough to mean the situation changed (same
+        cooldown-override pattern as should_alert)."""
+        now = _now_iso()
+        with closing(self._connect()) as conn:
+            conn.execute(
+                "INSERT INTO decisions (opportunity_id, action, decided_at, score_at_decision) VALUES (?,?,?,?) "
+                "ON CONFLICT(opportunity_id) DO UPDATE SET action=excluded.action, decided_at=excluded.decided_at, score_at_decision=excluded.score_at_decision",
+                (opportunity_id, action, now, score),
+            )
+            conn.commit()
+
+    def get_decisions(self) -> dict[str, tuple[str, float]]:
+        """{opportunity_id: (action, score_at_decision)} for every
+        opportunity the user has acted on via a Telegram button."""
+        with closing(self._connect()) as conn:
+            rows = conn.execute("SELECT opportunity_id, action, score_at_decision FROM decisions").fetchall()
+        return {r[0]: (r[1], r[2]) for r in rows}
 
     def mark_alerted(self, opportunity_id: str, score: float) -> None:
         now = _now_iso()
