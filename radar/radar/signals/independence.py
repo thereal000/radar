@@ -26,11 +26,11 @@ from .cluster import Cluster
 
 
 def _parse(ts: str | None) -> datetime | None:
-    if not ts:
+    if not ts or not isinstance(ts, str):
         return None
     try:
         return datetime.fromisoformat(ts)
-    except ValueError:
+    except (ValueError, TypeError):
         return None
 
 

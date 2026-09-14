@@ -18,8 +18,17 @@ from __future__ import annotations
 from datetime import datetime
 
 
-def _parse(ts: str) -> datetime:
-    return datetime.fromisoformat(ts)
+def _parse_or_none(ts):
+    """Best-effort ISO parsing: never raise on a malformed / non-string
+    timestamp (found by fuzzing — fromisoformat raises TypeError, not
+    ValueError, on a non-string, which used to escape the ValueError-only
+    guards and abort the cycle)."""
+    if not isinstance(ts, str):
+        return None
+    try:
+        return datetime.fromisoformat(ts)
+    except ValueError:
+        return None
 
 
 def compute_velocity(snapshots: list[dict]) -> float | None:
@@ -27,7 +36,10 @@ def compute_velocity(snapshots: list[dict]) -> float | None:
     if len(snapshots) < 2:
         return None
     prev, last = snapshots[-2], snapshots[-1]
-    dt_hours = (_parse(last["snapshot_at"]) - _parse(prev["snapshot_at"])).total_seconds() / 3600
+    prev_at, last_at = _parse_or_none(prev.get("snapshot_at")), _parse_or_none(last.get("snapshot_at"))
+    if prev_at is None or last_at is None:
+        return None
+    dt_hours = (last_at - prev_at).total_seconds() / 3600
     if dt_hours <= 0:
         return None
     return (last["signal_count"] - prev["signal_count"]) / dt_hours
@@ -37,6 +49,9 @@ def classify_trend(snapshots: list[dict]) -> str:
     """Returns one of: insufficient_data, accelerating, steady, saturating."""
     counts = [s["signal_count"] for s in snapshots]
     if len(counts) < 3:
+        return "insufficient_data"
+
+    if not all(isinstance(c, int) for c in counts):
         return "insufficient_data"
 
     if len(counts) >= 5:

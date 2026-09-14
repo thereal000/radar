@@ -172,7 +172,7 @@ Without this, `run.py` still works — it just collects from the other four sour
 
 ## Configuration
 
-For the Telegram bot, create `.env.local` in the project root (gitignored — never commit real tokens):
+For the Telegram bot, copy `.env.local.example` to `.env.local` in the project root and fill it in (gitignored — never commit real tokens):
 
 ```
 TELEGRAM_BOT_TOKEN=your_bot_token
@@ -222,7 +222,8 @@ Built with significant assistance from **Claude (Anthropic's Claude Code)**, use
 - Verification against the opportunity's own official page currently only exists for hackathons (`verify_hackathon.py`). Airdrops, free-credit programs, and events are detected and scored, but not yet fact-checked against their own source before notifying — that's the logical next one to build, using the same pattern.
 - Deadline/prize extraction from a fetched page is regex-based, best-effort — it reports what it found in the page text, not a guaranteed-correct fact. If a page is behind an anti-bot or login check, RADAR says so and asks you to check it yourself rather than trying to get past it.
 - X/Reddit collection depends on a logged-in browser session (`opencli`), the least "zero-setup" part of the stack — the other four sources need no authentication at all.
+- Cross-run matching compares each new cluster against every stored opportunity (roughly O(new × stored), with fuzzy comparisons), so it grows with accumulated history. Fine for a personal radar's history; not built to scale to hundreds of thousands of stored opportunities. A deterministic MinHash cache removes the repeated rebuild of unchanged representatives (see `CHANGELOG.md`).
 
 ## License
 
-No license file is included yet — all rights reserved by default. Open an issue if you'd like to use this beyond the hackathon.
+MIT — see [`LICENSE`](LICENSE).

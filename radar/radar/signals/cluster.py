@@ -53,8 +53,14 @@ class Cluster:
 
 
 def build_clusters(signals: list[Signal]) -> list[Cluster]:
-    keys = [f"{s.source}:{s.source_id}" for s in signals]
-    by_key = dict(zip(keys, signals))
+    # Deduplicate by (source, source_id) up front: cluster/union-find ids are
+    # derived from this key, and a duplicate key would make the union-find
+    # and the MinHash index ambiguous (and used to raise inside
+    # MinHashLSH.insert). Keep the first occurrence.
+    by_key: dict[str, Signal] = {}
+    for s in signals:
+        by_key.setdefault(f"{s.source}:{s.source_id}", s)
+    keys = list(by_key)
     uf = _UnionFind(keys)
 
     # 1) exact canonical URL match

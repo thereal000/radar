@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
@@ -45,10 +47,31 @@ class PipelineResult:
         return self.raw_by_source.get("reddit", [])
 
 
+def _raw_key(p: dict) -> str:
+    """Stable natural key for a raw item, so multi-query dedup never
+    collapses distinct items onto one key. Different sources name this
+    differently (X/Reddit: "id", GitHub: "fullName", HN: "objectID", RSS
+    often only a "link"/"guid"), and some feeds have no id at all.
+
+    Real bug found by probing: the previous version keyed solely on
+    `str(p.get("id"))`, so three distinct id-less RSS entries all became
+    the literal key "None" and collapsed into a single signal.
+    """
+    for key in ("id", "fullName", "objectID", "guid", "link", "url"):
+        value = p.get(key)
+        if value:
+            return str(value)
+    # No usable identifier at all: fall back to a content fingerprint so
+    # genuinely different items stay distinct instead of merging on "None".
+    return hashlib.sha1(
+        json.dumps(p, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
 def _dedupe_raw_by_id(posts: list[dict]) -> list[dict]:
     by_id: dict[str, dict] = {}
     for p in posts:
-        pid = str(p.get("id"))
+        pid = _raw_key(p)
         if pid in by_id:
             existing_queries = by_id[pid].setdefault("_matched_queries", [by_id[pid].get("_collector_query")])
             q = p.get("_collector_query")
@@ -147,7 +170,11 @@ def run_pipeline(
                     _collect_all_queries, _QUERY_BASED_SOURCES[src], queries, limits.get(src), src
                 )
         for src, future in futures.items():
-            raw_by_source[src] = future.result()
+            try:
+                raw_by_source[src] = future.result()
+            except Exception as e:  # noqa: BLE001 - a dead source must not kill the whole cycle
+                print(f"[warn] source {src} produced no results this cycle: {e}")
+                raw_by_source[src] = []
 
     # Same post surfacing under multiple queries within one source is a
     # literal duplicate (same id) — collapse before normalization.

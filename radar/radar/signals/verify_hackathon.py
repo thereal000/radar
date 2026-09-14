@@ -64,13 +64,26 @@ def _is_social_platform_url(url: str) -> bool:
     return any(d in url for d in _SOCIAL_DOMAINS)
 
 
+def _is_fetchable_http_url(url: str) -> bool:
+    """Only ever hand the browser bridge an http(s) URL. Candidate links
+    are scraped straight out of third-party post text, so this is a cheap
+    guard against a post steering the fetch at a non-web scheme
+    (javascript:, file:, data:, ...) — the same action-safety posture the
+    rest of this module follows."""
+    return url.startswith("http://") or url.startswith("https://")
+
+
 def _candidate_urls(score: OpportunityScore) -> list[str]:
     urls: list[str] = []
-    if score.representative_url and not _is_social_platform_url(score.representative_url):
+    if (
+        score.representative_url
+        and not _is_social_platform_url(score.representative_url)
+        and _is_fetchable_http_url(score.representative_url)
+    ):
         urls.append(score.representative_url)
     for u in _URL_RE.findall(score.representative_text or ""):
         u = u.rstrip(").,!…")
-        if u not in urls and not _is_social_platform_url(u):
+        if u not in urls and not _is_social_platform_url(u) and _is_fetchable_http_url(u):
             urls.append(u)
     return urls
 

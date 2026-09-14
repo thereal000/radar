@@ -31,12 +31,12 @@ from .risk import assess_risk
 from .velocity import classify_trend, compute_velocity
 
 
-def _hours_since(iso_ts: str | None) -> float:
-    if not iso_ts:
+def _hours_since(iso_ts=None) -> float:
+    if not isinstance(iso_ts, str):
         return 999.0
     try:
         ts = datetime.fromisoformat(iso_ts)
-    except ValueError:
+    except (ValueError, TypeError):
         return 999.0
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
@@ -68,6 +68,13 @@ _LOW_EFFORT_RE = re.compile(
 _MONEY_MENTION_RE = re.compile(
     r"\$\s?\d[\d,]*(?:\.\d+)?|\d[\d,]*\s?(?:usd|usdc|usdt|eth|sol|btc|pts?|points|credits)\b", re.I
 )
+
+# A cluster independently reported on 3+ distinct platforms is considered
+# fully diverse. This used to be a hard-coded len(platforms)/2 because only
+# X+Reddit existed; when the radar grew to 6 sources that divisor was never
+# revisited, so a 4-platform cluster scored diversity=2.0 and inflated the
+# composite score (real bug found by probing). Named + capped now.
+_DIVERSITY_FULL_AT = 3
 
 
 def _compute_effort(text: str) -> float:
@@ -150,13 +157,13 @@ def score_opportunity(cluster: Cluster, opportunity_id: str, snapshots: list[dic
     trend = classify_trend(snapshots)
 
     most_recent_published = max(
-        (s.published_at for s in cluster.signals if s.published_at), default=None
+        (s.published_at for s in cluster.signals if isinstance(s.published_at, str)), default=None
     )
     recency_hours = _hours_since(most_recent_published)
 
     engagement_score = _squash(total_engagement, saturate_at=10_000)
     velocity_score = min(1.0, max(0.0, velocity or 0.0) / 20)
-    diversity_score = len(platforms) / 2  # 2 platforms tracked today (X, Reddit)
+    diversity_score = min(1.0, len(platforms) / _DIVERSITY_FULL_AT)
     corroboration_score = _squash(signal_count, saturate_at=50)
     recency_score = max(0.0, 1 - recency_hours / 72)  # decays over 3 days
 

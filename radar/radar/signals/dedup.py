@@ -18,6 +18,7 @@ from __future__ import annotations
 import re
 from collections import defaultdict
 from dataclasses import dataclass
+from functools import lru_cache
 
 from datasketch import MinHash, MinHashLSH
 from rapidfuzz import fuzz
@@ -38,7 +39,7 @@ def extract_entities(raw_text: str) -> set[str]:
     tuned to the airdrop/giveaway/hackathon domain, deliberately avoiding a
     heavy spaCy/transformer dependency for what is, for now, a foundation
     layer."""
-    if not raw_text:
+    if not raw_text or not isinstance(raw_text, str):
         return set()
     ents = set()
     ents |= {m.group(0).lower().replace(" ", "") for m in _MONEY_RE.finditer(raw_text)}
@@ -54,7 +55,20 @@ def _shingles(text: str, k: int = _SHINGLE_SIZE) -> set[str]:
     return {" ".join(tokens[i : i + k]) for i in range(len(tokens) - k + 1)}
 
 
+@lru_cache(maxsize=8192)
 def build_minhash(normalized_text: str) -> MinHash:
+    """Build (or fetch from cache) the MinHash of a normalized text.
+
+    The result is cached by text because it is deterministic and callers
+    only ever read it (.jaccard / LSH insert) — never mutate it. This
+    matters at scale: store.persist_run rebuilds the MinHash of EVERY
+    previously-stored opportunity on EVERY run to match new clusters
+    against them (see store._existing_opportunities"s own note about the
+    real "hundreds of thousands of redundant shingle+hash builds" that
+    ground the radar to a crawl). Caching by text — stable by definition
+    once an opportunity's representative_text is stored — turns that
+    repeated rebuild into a dict lookup for every rep seen before.
+    """
     mh = MinHash(num_perm=_NUM_PERM)
     for shingle in _shingles(normalized_text):
         mh.update(shingle.encode("utf-8"))
@@ -114,6 +128,14 @@ def build_lsh_index(signals: list[Signal], threshold: float = 0.2) -> tuple[MinH
     minhashes: dict[str, MinHash] = {}
     for sig in signals:
         key = f"{sig.source}:{sig.source_id}"
+        # Two signals can share a (source, source_id) key — e.g. two items
+        # whose upstream id was missing, or the same id under two
+        # sub-queries. datasketch's MinHashLSH.insert raises ValueError
+        # ("The given key already exists") on a duplicate insert, which
+        # used to take the whole cycle down (found by fuzzing). Keep the
+        # first occurrence and skip the rest.
+        if key in minhashes:
+            continue
         mh = build_minhash(sig.normalized_text or "")
         minhashes[key] = mh
         lsh.insert(key, mh)
@@ -152,7 +174,9 @@ def find_duplicate_pairs(signals: list[Signal]) -> list[DupEvidence]:
     but which share the one entity (reward amount, project name) that
     actually identifies them as the same opportunity."""
     lsh, minhashes = build_lsh_index(signals)
-    by_key = {f"{s.source}:{s.source_id}": s for s in signals}
+    by_key: dict[str, Signal] = {}
+    for s in signals:
+        by_key.setdefault(f"{s.source}:{s.source_id}", s)
     entities_cache = {k: extract_entities(s.text or s.title or "") for k, s in by_key.items()}
 
     candidate_pairs: set[tuple[str, str]] = set()
